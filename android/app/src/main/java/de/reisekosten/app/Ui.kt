@@ -4,6 +4,7 @@ package de.reisekosten.app
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
@@ -33,7 +34,12 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.Flight
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Hotel
+import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.LocalActivity
 import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Refresh
@@ -62,6 +68,9 @@ import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -81,6 +90,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -116,8 +126,20 @@ private fun dayLabel(iso: String): String = runCatching {
     }
 }.getOrDefault(iso)
 
+/** Nur Ziffern, Komma, Punkt und ein Minus ganz vorne. */
+private fun signedAmount(v: String): String =
+    (if (v.startsWith("-")) "-" else "") + v.filter { it.isDigit() || it == ',' || it == '.' }
+
+@Composable
+private fun creditColor(): Color = if (isSystemInDarkTheme()) Color(0xFF81C784) else Color(0xFF2E7D32)
+
+private fun rateText(rate: Double, cur: String, base: String): String =
+    String.format(German, "1 %s = %.4f %s", cur, rate, base)
+
 private fun categoryIcon(c: String): ImageVector = when (c) {
-    "Transport" -> Icons.Filled.DirectionsCar
+    "Transport", "Transport Kurzstrecke" -> Icons.Filled.DirectionsCar
+    "Transport Langstrecke" -> Icons.Filled.Flight
+    "Kaution" -> Icons.Filled.Key
     "Unterkunft" -> Icons.Filled.Hotel
     "Essen & Trinken" -> Icons.Filled.Restaurant
     "Aktivitäten" -> Icons.Filled.LocalActivity
@@ -153,6 +175,7 @@ private fun MainScreen(state: UiState, vm: MainViewModel, onOpenConnection: () -
     var showAdd by rememberSaveable { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
     var toDelete by remember { mutableStateOf<Expense?>(null) }
+    var exchangeToDelete by remember { mutableStateOf<Exchange?>(null) }
 
     LaunchedEffect(Unit) { vm.messages.collect { snackbar.showSnackbar(it) } }
     LaunchedEffect(state.error) {
@@ -200,18 +223,39 @@ private fun MainScreen(state: UiState, vm: MainViewModel, onOpenConnection: () -
                     )
                 }
             } else {
-                ExpenseList(state, data, filter, onFilter = { filter = it }, onDelete = { toDelete = it })
+                ExpenseList(
+                    state, data, filter, onFilter = { filter = it },
+                    onDelete = { toDelete = it }, onDeleteExchange = { exchangeToDelete = it },
+                )
             }
         }
     }
 
     if (showAdd && data != null) {
-        AddExpenseSheet(
+        AddSheet(
+            state = state,
             data = data,
             defaultCurrency = vm.defaultCurrency(data),
             defaultPaidBy = vm.lastPaidBy,
+            defaultPayment = vm.lastPayment,
+            defaultCountry = vm.lastCountry,
             onDismiss = { showAdd = false },
             onSave = { vm.addExpense(it); showAdd = false },
+            onSaveExchange = { vm.addExchange(it); showAdd = false },
+        )
+    }
+
+    exchangeToDelete?.let { x ->
+        AlertDialog(
+            onDismissRequest = { exchangeToDelete = null },
+            title = { Text("Geldwechsel löschen?") },
+            text = {
+                Text("${money(x.received, x.currency)} für ${money(x.paid, data?.settings?.baseCurrency ?: "EUR")}")
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.deleteExchange(x); exchangeToDelete = null }) { Text("Löschen") }
+            },
+            dismissButton = { TextButton(onClick = { exchangeToDelete = null }) { Text("Abbrechen") } },
         )
     }
 
@@ -235,6 +279,7 @@ private fun ExpenseList(
     filter: String?,
     onFilter: (String?) -> Unit,
     onDelete: (Expense) -> Unit,
+    onDeleteExchange: (Exchange) -> Unit,
 ) {
     val base = data.settings.baseCurrency
     val all = state.allExpenses
@@ -248,12 +293,21 @@ private fun ExpenseList(
     ) {
         item(key = "summary") { SummaryCard(data.settings, all.sumOf { it.baseAmount }) }
 
-        if (state.offline || state.pending.isNotEmpty()) {
-            item(key = "status") { StatusBanner(state.offline, state.pending.size) }
+        val pendingCount = state.pending.size + state.pendingExchanges.size
+        if (state.offline || pendingCount > 0) {
+            item(key = "status") { StatusBanner(state.offline, pendingCount) }
         }
 
         if (all.isNotEmpty()) {
             item(key = "cats") { CategoryCard(all, base) }
+        }
+
+        if (all.any { it.country.isNotBlank() }) {
+            item(key = "countries") { CountryCard(all, base) }
+        }
+
+        if (state.allExchanges.isNotEmpty()) {
+            item(key = "cash") { CashCard(state.cash, state.allExchanges, base, onDeleteExchange) }
         }
 
         item(key = "filter") {
@@ -349,8 +403,8 @@ private fun StatusBanner(offline: Boolean, pending: Int) {
                 buildString {
                     if (offline) append("Offline. ")
                     if (pending > 0) append(
-                        if (pending == 1) "1 Ausgabe wird gesendet, sobald du online bist."
-                        else "$pending Ausgaben werden gesendet, sobald du online bist."
+                        if (pending == 1) "1 Eintrag wird gesendet, sobald du online bist."
+                        else "$pending Einträge werden gesendet, sobald du online bist."
                     )
                     else append("Angezeigt wird der letzte bekannte Stand.")
                 },
@@ -383,10 +437,92 @@ private fun CategoryCard(all: List<Expense>, base: String) {
                     }
                     Spacer(Modifier.height(4.dp))
                     LinearProgressIndicator(
-                        progress = { (sum / max).toFloat() },
+                        progress = { (sum / max).toFloat().coerceIn(0f, 1f) },
                         modifier = Modifier.fillMaxWidth().height(4.dp),
                         trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CountryCard(all: List<Expense>, base: String) {
+    val sums = all.groupBy { it.country.ifBlank { "Ohne Land" } }
+        .mapValues { (_, v) -> v.sumOf { it.baseAmount } }
+        .entries.sortedByDescending { it.value }
+    val max = sums.maxOf { it.value }.coerceAtLeast(0.01)
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Nach Land", style = MaterialTheme.typography.titleSmall)
+            sums.forEach { (land, sum) ->
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Public, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text(land, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Text(money(sum, base), style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { (sum / max).toFloat().coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CashCard(cash: List<CashInfo>, exchanges: List<Exchange>, base: String, onDelete: (Exchange) -> Unit) {
+    var showAll by rememberSaveable { mutableStateOf(false) }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Bargeld", style = MaterialTheme.typography.titleSmall)
+            cash.forEach { c ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Payments, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("${money(c.left, c.currency)} übrig", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Ø ${rateText(c.rate, c.currency, base)} · ${money(c.received, c.currency)} für ${money(c.paid, base)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            TextButton(onClick = { showAll = !showAll }, contentPadding = PaddingValues(0.dp)) {
+                Text(if (showAll) "Wechsel ausblenden" else "Wechsel anzeigen (${exchanges.size})")
+            }
+            if (showAll) exchanges.forEach { x ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "${money(x.received, x.currency)} für ${money(x.paid, base)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        val meta = listOfNotNull(
+                            runCatching { LocalDate.parse(x.date).format(ShortDate) }.getOrDefault(x.date),
+                            x.note.takeIf { it.isNotBlank() },
+                            "nicht gesendet".takeIf { x.pending },
+                        ).joinToString(" · ")
+                        Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { onDelete(x) }) {
+                        Icon(Icons.Filled.DeleteOutline, "Löschen", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
@@ -418,13 +554,21 @@ private fun ExpenseRow(e: Expense, base: String, onDelete: (Expense) -> Unit) {
                 )
                 val meta = listOfNotNull(
                     e.category,
+                    "Gutschrift".takeIf { e.amount < 0 },
+                    e.country.takeIf { it.isNotBlank() },
+                    "bar".takeIf { e.isCash },
                     e.paidBy.takeIf { it.isNotBlank() },
                     "nicht gesendet".takeIf { e.pending },
                 ).joinToString(" · ")
                 Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text(money(e.baseAmount, base), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Text(
+                    money(e.baseAmount, base),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = if (e.baseAmount < 0) creditColor() else Color.Unspecified,
+                )
                 if (e.currency != base) {
                     Text(
                         money(e.amount, e.currency),
@@ -440,29 +584,22 @@ private fun ExpenseRow(e: Expense, base: String, onDelete: (Expense) -> Unit) {
     }
 }
 
-// ------------------------------------------------------------------ Neue Ausgabe
+// ------------------------------------------------------------------ Neue Ausgabe / Geldwechsel
 
 @Composable
-private fun AddExpenseSheet(
+private fun AddSheet(
+    state: UiState,
     data: TripData,
     defaultCurrency: String,
     defaultPaidBy: String,
+    defaultPayment: String,
+    defaultCountry: String,
     onDismiss: () -> Unit,
     onSave: (Draft) -> Unit,
+    onSaveExchange: (ExchangeDraft) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var date by remember { mutableStateOf(LocalDate.now()) }
-    var category by rememberSaveable { mutableStateOf(data.categories.firstOrNull() ?: "Sonstiges") }
-    var description by rememberSaveable { mutableStateOf("") }
-    var amountText by rememberSaveable { mutableStateOf("") }
-    var currency by rememberSaveable { mutableStateOf(defaultCurrency) }
-    var paidBy by rememberSaveable { mutableStateOf(defaultPaidBy) }
-    var showDate by remember { mutableStateOf(false) }
-
-    val amount = amountText.replace(',', '.').toDoubleOrNull()
-    val valid = amount != null && amount > 0
-    val amountFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { amountFocus.requestFocus() }
+    var exchangeMode by rememberSaveable { mutableStateOf(false) }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -473,93 +610,271 @@ private fun AddExpenseSheet(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("Neue Ausgabe", style = MaterialTheme.typography.titleLarge)
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = amountText,
-                    onValueChange = { v -> amountText = v.filter { it.isDigit() || it == ',' || it == '.' } },
-                    label = { Text("Betrag") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.weight(1f).focusRequester(amountFocus),
-                )
-                Dropdown(
-                    label = "Währung",
-                    value = currency,
-                    options = data.settings.rates.keys.sorted(),
-                    onSelect = { currency = it },
-                    modifier = Modifier.width(130.dp),
-                )
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                SegmentedButton(
+                    selected = !exchangeMode, onClick = { exchangeMode = false },
+                    shape = SegmentedButtonDefaults.itemShape(0, 2),
+                ) { Text("Ausgabe") }
+                SegmentedButton(
+                    selected = exchangeMode, onClick = { exchangeMode = true },
+                    shape = SegmentedButtonDefaults.itemShape(1, 2),
+                ) { Text("Bargeld geholt") }
             }
-            if (amount != null && currency != data.settings.baseCurrency) {
-                val rate = data.settings.rates[currency] ?: 1.0
-                Text(
-                    "≈ ${money(amount * rate, data.settings.baseCurrency)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (exchangeMode) {
+                ExchangeForm(data, defaultCurrency, onSaveExchange)
+            } else {
+                ExpenseForm(state, data, defaultCurrency, defaultPaidBy, defaultPayment, defaultCountry, onSave)
             }
-
-            Dropdown(
-                label = "Kategorie",
-                value = category,
-                options = data.categories,
-                onSelect = { category = it },
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            OutlinedTextField(
-                value = description,
-                onValueChange = { description = it },
-                label = { Text("Beschreibung") },
-                placeholder = { Text("z. B. Taxi zum Hotel") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            val dateClicks = remember { MutableInteractionSource() }
-            LaunchedEffect(dateClicks) {
-                dateClicks.interactions.collect { if (it is PressInteraction.Release) showDate = true }
-            }
-            OutlinedTextField(
-                value = date.format(ShortDate),
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("Datum") },
-                trailingIcon = {
-                    IconButton(onClick = { showDate = true }) { Icon(Icons.Filled.CalendarMonth, "Datum wählen") }
-                },
-                interactionSource = dateClicks,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            OutlinedTextField(
-                value = paidBy,
-                onValueChange = { paidBy = it },
-                label = { Text("Bezahlt von (optional)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Button(
-                onClick = {
-                    onSave(
-                        Draft(
-                            date = date.toString(),
-                            category = category,
-                            description = description.trim(),
-                            amount = amount ?: 0.0,
-                            currency = currency,
-                            paidBy = paidBy.trim(),
-                        )
-                    )
-                },
-                enabled = valid,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-            ) { Text("Speichern") }
         }
     }
+}
+
+@Composable
+private fun ExpenseForm(
+    state: UiState,
+    data: TripData,
+    defaultCurrency: String,
+    defaultPaidBy: String,
+    defaultPayment: String,
+    defaultCountry: String,
+    onSave: (Draft) -> Unit,
+) {
+    val base = data.settings.baseCurrency
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    var category by rememberSaveable { mutableStateOf(data.categories.firstOrNull() ?: "Sonstiges") }
+    var description by rememberSaveable { mutableStateOf("") }
+    var amountText by rememberSaveable { mutableStateOf("") }
+    var currency by rememberSaveable { mutableStateOf(defaultCurrency) }
+    var paidBy by rememberSaveable { mutableStateOf(defaultPaidBy) }
+    var payment by rememberSaveable { mutableStateOf(defaultPayment) }
+    var country by rememberSaveable { mutableStateOf(defaultCountry) }
+
+    val amount = amountText.replace(',', '.').toDoubleOrNull()
+    val valid = amount != null && amount != 0.0
+    val amountFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { amountFocus.requestFocus() }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = amountText,
+            onValueChange = { v -> amountText = signedAmount(v) },
+            label = { Text("Betrag") },
+            supportingText = { Text("± = Gutschrift") },
+            trailingIcon = {
+                // Nicht jede Zahlentastatur hat ein Minus – daher der Umschalter
+                TextButton(onClick = {
+                    amountText = if (amountText.startsWith("-")) amountText.drop(1) else "-$amountText"
+                }) { Text("±", style = MaterialTheme.typography.titleMedium) }
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.weight(1f).focusRequester(amountFocus),
+        )
+        Dropdown(
+            label = "Währung",
+            value = currency,
+            options = data.settings.rates.keys.sorted(),
+            onSelect = { currency = it },
+            modifier = Modifier.width(130.dp),
+        )
+    }
+
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        SegmentedButton(
+            selected = payment == PAY_CARD, onClick = { payment = PAY_CARD },
+            shape = SegmentedButtonDefaults.itemShape(0, 2),
+            icon = { Icon(Icons.Filled.CreditCard, null, Modifier.size(18.dp)) },
+        ) { Text("Karte / Konto") }
+        SegmentedButton(
+            selected = payment == PAY_CASH, onClick = { payment = PAY_CASH },
+            shape = SegmentedButtonDefaults.itemShape(1, 2),
+            icon = { Icon(Icons.Filled.Payments, null, Modifier.size(18.dp)) },
+        ) { Text("Bargeld") }
+    }
+
+    if (currency != base) {
+        val rate = state.rateFor(currency, payment)
+        val fromCash = payment == PAY_CASH && cashRates(state.allExchanges)[currency] != null
+        val source = when {
+            fromCash -> "Ø-Kurs deiner Wechsel"
+            payment == PAY_CASH -> "noch kein Wechsel erfasst, Kurs aus Einstellungen"
+            else -> "Kurs aus Einstellungen"
+        }
+        Text(
+            buildString {
+                if (amount != null) append("≈ ${money(amount * rate, base)} · ")
+                append("${rateText(rate, currency, base)} ($source)")
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    Dropdown(
+        label = "Kategorie",
+        value = category,
+        options = data.categories,
+        onSelect = { category = it },
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    OutlinedTextField(
+        value = description,
+        onValueChange = { description = it },
+        label = { Text("Beschreibung") },
+        placeholder = { Text("z. B. Taxi zum Hotel") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    DateField(date) { date = it }
+
+    SuggestField(
+        label = "Land (optional)",
+        value = country,
+        suggestions = state.countries,
+        onChange = { country = it },
+    )
+
+    OutlinedTextField(
+        value = paidBy,
+        onValueChange = { paidBy = it },
+        label = { Text("Bezahlt von (optional)") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Button(
+        onClick = {
+            onSave(
+                Draft(
+                    date = date.toString(),
+                    category = category,
+                    description = description.trim(),
+                    amount = amount ?: 0.0,
+                    currency = currency,
+                    paidBy = paidBy.trim(),
+                    payment = payment,
+                    country = country.trim(),
+                )
+            )
+        },
+        enabled = valid,
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+    ) { Text("Speichern") }
+}
+
+@Composable
+private fun ExchangeForm(data: TripData, defaultCurrency: String, onSave: (ExchangeDraft) -> Unit) {
+    val base = data.settings.baseCurrency
+    val foreign = data.settings.rates.keys.filter { it != base }.sorted()
+    var date by remember { mutableStateOf(LocalDate.now()) }
+    var currency by rememberSaveable {
+        mutableStateOf(defaultCurrency.takeIf { it != base } ?: foreign.firstOrNull() ?: "")
+    }
+    var receivedText by rememberSaveable { mutableStateOf("") }
+    var paidText by rememberSaveable { mutableStateOf("") }
+    var note by rememberSaveable { mutableStateOf("") }
+
+    val received = receivedText.replace(',', '.').toDoubleOrNull()
+    val paid = paidText.replace(',', '.').toDoubleOrNull()
+    val valid = currency.isNotBlank() && received != null && received > 0 && paid != null && paid > 0
+
+    Text(
+        "Geld gewechselt oder am Automaten abgehoben? Trag ein, was du bekommen hast und was es dich " +
+            "insgesamt gekostet hat (inkl. Gebühren). Bar-Ausgaben werden dann mit diesem Kurs umgerechnet.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    if (foreign.isEmpty()) {
+        Text(
+            "Lege zuerst im Blatt „Einstellungen“ eine Fremdwährung an.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+        )
+        return
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = receivedText,
+            onValueChange = { v -> receivedText = v.filter { it.isDigit() || it == ',' || it == '.' } },
+            label = { Text("Erhalten") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.weight(1f),
+        )
+        Dropdown(
+            label = "Währung",
+            value = currency,
+            options = foreign,
+            onSelect = { currency = it },
+            modifier = Modifier.width(130.dp),
+        )
+    }
+
+    OutlinedTextField(
+        value = paidText,
+        onValueChange = { v -> paidText = v.filter { it.isDigit() || it == ',' || it == '.' } },
+        label = { Text("Bezahlt / abgebucht in $base") },
+        supportingText = { Text("Laut Kontoauszug bzw. Wechselquittung, inkl. Gebühren") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    if (received != null && received > 0 && paid != null && paid > 0) {
+        val rate = paid / received
+        val ref = data.settings.rates[currency]
+        Text(
+            buildString {
+                append("Dein Kurs: ${rateText(rate, currency, base)}")
+                if (ref != null && ref > 0) {
+                    append(String.format(German, " (%+.1f %% ggü. Einstellungen)", (rate / ref - 1) * 100))
+                }
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    DateField(date) { date = it }
+
+    OutlinedTextField(
+        value = note,
+        onValueChange = { note = it },
+        label = { Text("Notiz (optional)") },
+        placeholder = { Text("z. B. Automat Flughafen") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Button(
+        onClick = { onSave(ExchangeDraft(date.toString(), currency, received ?: 0.0, paid ?: 0.0, note.trim())) },
+        enabled = valid,
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+    ) { Text("Speichern") }
+}
+
+@Composable
+private fun DateField(date: LocalDate, onChange: (LocalDate) -> Unit) {
+    var showDate by remember { mutableStateOf(false) }
+    val dateClicks = remember { MutableInteractionSource() }
+    LaunchedEffect(dateClicks) {
+        dateClicks.interactions.collect { if (it is PressInteraction.Release) showDate = true }
+    }
+    OutlinedTextField(
+        value = date.format(ShortDate),
+        onValueChange = {},
+        readOnly = true,
+        label = { Text("Datum") },
+        trailingIcon = {
+            IconButton(onClick = { showDate = true }) { Icon(Icons.Filled.CalendarMonth, "Datum wählen") }
+        },
+        interactionSource = dateClicks,
+        modifier = Modifier.fillMaxWidth(),
+    )
 
     if (showDate) {
         val dpState = rememberDatePickerState(
@@ -570,7 +885,7 @@ private fun AddExpenseSheet(
             confirmButton = {
                 TextButton(onClick = {
                     dpState.selectedDateMillis?.let {
-                        date = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate()
+                        onChange(Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate())
                     }
                     showDate = false
                 }) { Text("OK") }
@@ -602,6 +917,40 @@ private fun Dropdown(
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { opt ->
                 DropdownMenuItem(text = { Text(opt) }, onClick = { onSelect(opt); expanded = false })
+            }
+        }
+    }
+}
+
+/** Freitextfeld mit Vorschlägen aus bisherigen Einträgen. */
+@Composable
+private fun SuggestField(
+    label: String,
+    value: String,
+    suggestions: List<String>,
+    onChange: (String) -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth(),
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val matches = suggestions.filter { it.contains(value.trim(), ignoreCase = true) && it != value }
+    ExposedDropdownMenuBox(
+        expanded = expanded && matches.isNotEmpty(),
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { onChange(it); expanded = true },
+            singleLine = true,
+            label = { Text(label) },
+            trailingIcon = {
+                if (suggestions.isNotEmpty()) ExposedDropdownMenuDefaults.TrailingIcon(expanded && matches.isNotEmpty())
+            },
+            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryEditable).fillMaxWidth(),
+        )
+        ExposedDropdownMenu(expanded = expanded && matches.isNotEmpty(), onDismissRequest = { expanded = false }) {
+            matches.forEach { opt ->
+                DropdownMenuItem(text = { Text(opt) }, onClick = { onChange(opt); expanded = false })
             }
         }
     }

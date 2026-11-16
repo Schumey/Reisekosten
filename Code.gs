@@ -4,7 +4,12 @@
  *
  * Tabellenblätter (werden automatisch angelegt):
  *   "Ausgaben"      – eine Zeile pro Ausgabe
+ *   "Bargeld"       – eine Zeile pro Geldwechsel / Abhebung am Automaten
  *   "Einstellungen" – Reisename, Budget, Hauptwährung, Wechselkurse
+ *
+ * Zahlart: "Karte" (Konto/Karte) nutzt den Kurs aus "Einstellungen".
+ * "Bar" nutzt den Durchschnittskurs aller Wechsel/Abhebungen dieser Währung
+ * (Summe bezahlt in Hauptwährung / Summe erhalten). Ohne Wechsel: Kurs aus "Einstellungen".
  *
  * Sicherheit: Die Web-App läuft als "Jeder" erreichbar, jede Anfrage muss aber
  * den geheimen Schlüssel mitschicken. Den Schlüssel erzeugst du über das Menü
@@ -13,8 +18,10 @@
 
 const SHEET_EXPENSES = 'Ausgaben';
 const SHEET_SETTINGS = 'Einstellungen';
-const HEADERS = ['ID', 'Datum', 'Kategorie', 'Beschreibung', 'Betrag', 'Währung', 'Kurs', 'Betrag (Haupt)', 'Bezahlt von', 'Erfasst am'];
-const CATEGORIES = ['Transport', 'Unterkunft', 'Essen & Trinken', 'Aktivitäten', 'Einkäufe', 'Sonstiges'];
+const SHEET_CASH = 'Bargeld';
+const HEADERS = ['ID', 'Datum', 'Kategorie', 'Beschreibung', 'Betrag', 'Währung', 'Kurs', 'Betrag (Haupt)', 'Bezahlt von', 'Erfasst am', 'Zahlart', 'Land'];
+const CASH_HEADERS = ['ID', 'Datum', 'Währung', 'Erhalten', 'Bezahlt (Haupt)', 'Kurs', 'Notiz', 'Erfasst am'];
+const CATEGORIES = ['Transport Kurzstrecke', 'Transport Langstrecke', 'Unterkunft', 'Kaution', 'Essen & Trinken', 'Aktivitäten', 'Einkäufe', 'Sonstiges'];
 
 // ---------------------------------------------------------------- Einstieg
 
@@ -36,7 +43,13 @@ function doPost(e) {
         addExpense_(req.expense || {});
         return json_({ ok: true, data: getData_() });
       case 'deleteExpense':
-        deleteExpense_(req.id);
+        deleteRowById_(SHEET_EXPENSES, req.id);
+        return json_({ ok: true, data: getData_() });
+      case 'addExchange':
+        addExchange_(req.exchange || {});
+        return json_({ ok: true, data: getData_() });
+      case 'deleteExchange':
+        deleteRowById_(SHEET_CASH, req.id);
         return json_({ ok: true, data: getData_() });
       default:
         return json_({ ok: false, error: 'Unbekannte Aktion: ' + req.action });
@@ -94,6 +107,23 @@ function setup_() {
     exp.getRange('B:B').setNumberFormat('yyyy-mm-dd');
     exp.getRange('E:E').setNumberFormat('#,##0.00');
     exp.getRange('H:H').setNumberFormat('#,##0.00');
+  } else {
+    // Ältere Tabelle: fehlende Spalten (z. B. "Zahlart", "Land") ergänzen
+    const head = exp.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+    HEADERS.forEach((h, i) => {
+      if (head[i] === '') exp.getRange(1, i + 1).setValue(h).setFontWeight('bold');
+    });
+  }
+
+  let cash = ss.getSheetByName(SHEET_CASH);
+  if (!cash) {
+    cash = ss.insertSheet(SHEET_CASH);
+    cash.appendRow(CASH_HEADERS);
+    cash.setFrozenRows(1);
+    cash.getRange(1, 1, 1, CASH_HEADERS.length).setFontWeight('bold');
+    cash.getRange('B:B').setNumberFormat('yyyy-mm-dd');
+    cash.getRange('D:E').setNumberFormat('#,##0.00');
+    cash.getRange('F:F').setNumberFormat('0.000000');
   }
 
   let set = ss.getSheetByName(SHEET_SETTINGS);
@@ -130,19 +160,51 @@ function getSettings_() {
   return settings;
 }
 
+function rows_(name, cols) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(name);
+  return sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, cols).getValues() : [];
+}
+
+function isoDate_(v) {
+  return v instanceof Date ? Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd') : String(v);
+}
+
+function getExchanges_() {
+  return rows_(SHEET_CASH, CASH_HEADERS.length)
+    .filter(r => r[0])
+    .map(r => ({
+      id: String(r[0]),
+      date: isoDate_(r[1]),
+      currency: String(r[2]).toUpperCase(),
+      received: Number(r[3]),
+      paid: Number(r[4]),
+      note: String(r[6]),
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+/** Durchschnittskurs je Währung aus allen Wechseln/Abhebungen */
+function cashRates_(exchanges) {
+  const sums = {};
+  exchanges.forEach(x => {
+    const s = sums[x.currency] || (sums[x.currency] = { received: 0, paid: 0 });
+    s.received += x.received;
+    s.paid += x.paid;
+  });
+  const rates = {};
+  Object.keys(sums).forEach(c => { if (sums[c].received > 0) rates[c] = sums[c].paid / sums[c].received; });
+  return rates;
+}
+
 function getData_() {
   const settings = getSettings_();
-  const sh = SpreadsheetApp.getActive().getSheetByName(SHEET_EXPENSES);
-  const rows = sh.getLastRow() > 1
-    ? sh.getRange(2, 1, sh.getLastRow() - 1, HEADERS.length).getValues()
-    : [];
-  const tz = Session.getScriptTimeZone();
+  const rows = rows_(SHEET_EXPENSES, HEADERS.length);
 
   const expenses = rows
     .filter(r => r[0])
     .map(r => ({
       id: String(r[0]),
-      date: r[1] instanceof Date ? Utilities.formatDate(r[1], tz, 'yyyy-MM-dd') : String(r[1]),
+      date: isoDate_(r[1]),
       category: String(r[2]),
       description: String(r[3]),
       amount: Number(r[4]),
@@ -150,21 +212,27 @@ function getData_() {
       rate: Number(r[6]),
       baseAmount: Number(r[7]),
       paidBy: String(r[8]),
+      payment: String(r[10]) === 'Bar' ? 'Bar' : 'Karte',
+      country: String(r[11] || ''),
     }))
     .sort((a, b) => b.date.localeCompare(a.date));
 
-  return { settings, categories: CATEGORIES, expenses };
+  return { settings, categories: CATEGORIES, expenses, exchanges: getExchanges_() };
 }
 
 /** Speichert eine Ausgabe. Gleiche ID zweimal = nur einmal gespeichert (wichtig fürs Offline-Nachsenden). */
 function addExpense_(e) {
   const settings = getSettings_();
   const amount = Number(String(e.amount).replace(',', '.'));
-  if (!(amount > 0)) throw new Error('Bitte einen gültigen Betrag eingeben.');
+  // Negativ = Gutschrift (z. B. Kaution zurück, Erstattung)
+  if (!isFinite(amount) || amount === 0) throw new Error('Bitte einen gültigen Betrag eingeben.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(e.date || ''))) throw new Error('Ungültiges Datum.');
 
   const currency = String(e.currency || settings.baseCurrency).toUpperCase();
-  const rate = settings.rates[currency];
+  const payment = e.payment === 'Bar' ? 'Bar' : 'Karte';
+  const cashRate = payment === 'Bar' && currency !== settings.baseCurrency
+    ? cashRates_(getExchanges_())[currency] : undefined;
+  const rate = cashRate || settings.rates[currency];
   if (!rate) throw new Error('Kein Wechselkurs für ' + currency + ' im Blatt "Einstellungen".');
 
   const id = String(e.id || Utilities.getUuid());
@@ -188,17 +256,45 @@ function addExpense_(e) {
       Math.round(amount * rate * 100) / 100,
       e.paidBy || '',
       new Date(),
+      payment,
+      String(e.country || '').trim(),
     ]);
   } finally {
     lock.releaseLock();
   }
 }
 
-function deleteExpense_(id) {
+/** Speichert einen Geldwechsel / eine Abhebung. Auch hier: gleiche ID nur einmal. */
+function addExchange_(x) {
+  const settings = getSettings_();
+  const received = Number(String(x.received).replace(',', '.'));
+  const paid = Number(String(x.paid).replace(',', '.'));
+  if (!(received > 0) || !(paid > 0)) throw new Error('Bitte gültige Beträge für den Geldwechsel eingeben.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(x.date || ''))) throw new Error('Ungültiges Datum.');
+  const currency = String(x.currency || '').trim().toUpperCase();
+  if (!currency || currency === settings.baseCurrency) throw new Error('Bitte eine Fremdwährung wählen.');
+
+  const id = String(x.id || Utilities.getUuid());
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const sh = SpreadsheetApp.getActive().getSheetByName(SHEET_EXPENSES);
+    const sh = SpreadsheetApp.getActive().getSheetByName(SHEET_CASH);
+    if (sh.getLastRow() > 1) {
+      const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+      if (ids.some(r => String(r[0]) === id)) return;
+    }
+    const [y, m, d] = x.date.split('-').map(Number);
+    sh.appendRow([id, new Date(y, m - 1, d), currency, received, paid, paid / received, x.note || '', new Date()]);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteRowById_(sheetName, id) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
     if (sh.getLastRow() < 2) return;
     const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
     for (let i = 0; i < ids.length; i++) {

@@ -27,6 +27,12 @@ class Api(private val url: String, private val token: String) {
     fun deleteExpense(id: String): JSONObject =
         call(JSONObject().put("action", "deleteExpense").put("id", id))
 
+    fun addExchange(x: Exchange): JSONObject =
+        call(JSONObject().put("action", "addExchange").put("exchange", x.toJson()))
+
+    fun deleteExchange(id: String): JSONObject =
+        call(JSONObject().put("action", "deleteExchange").put("id", id))
+
     private fun call(body: JSONObject): JSONObject {
         body.put("token", token)
         val text = post(url, body.toString())

@@ -34,10 +34,15 @@ Alternativ per USB-Debugging: `adb install Reisekosten.apk`
 | ab Zeile 6 | Weitere Währungen und ihr Kurs (1 Einheit = x Hauptwährung), z. B. `USD` / `0.92` |
 
 Der Kurs wird beim Erfassen mitgespeichert. Spätere Kursänderungen ändern alte Einträge nicht.
-Die Kategorien stehen oben in `Code.gs` (`CATEGORIES`). Die Icons kennt die App für die sechs Standardkategorien.
+Die Kategorien stehen oben in `Code.gs` (`CATEGORIES`). Standard: Transport Kurzstrecke, Transport Langstrecke, Unterkunft, Kaution, Essen & Trinken, Aktivitäten, Einkäufe, Sonstiges. Für diese Kategorien hat die App eigene Icons.
 
 ## Funktionen
-- Ausgabe erfassen: Betrag, Währung (mit Umrechnung), Kategorie, Beschreibung, Datum, „bezahlt von“
+- Ausgabe erfassen: Betrag, Währung (mit Umrechnung), Zahlart (Karte/Konto oder Bargeld), Kategorie, Beschreibung, Datum, Land, „bezahlt von“
+- **Gutschriften:** Ein negativer Betrag (Minus oder ±-Taste im Betragsfeld) zählt als Gutschrift und senkt die Summe, z. B. eine zurückgezahlte Kaution oder eine Erstattung. Kaution beim Zahlen mit +, bei der Rückgabe mit − eintragen. Bar zurückbekommen erhöht den Bargeldstand.
+- **Land:** optional pro Ausgabe. Die App schlägt bereits verwendete Länder vor und merkt sich das zuletzt gewählte. Die Übersicht zeigt die Summen nach Land. Steht im Blatt „Ausgaben“ in der Spalte „Land“.
+- **Bargeld geholt:** Geldwechsel oder Abhebung am Automaten erfassen, also was du bekommen hast und was es in Hauptwährung gekostet hat (inkl. Gebühren). Steht im Blatt „Bargeld“.
+  - Bar-Ausgaben in Fremdwährung werden mit dem **Durchschnittskurs aller Wechsel** dieser Währung umgerechnet. Kartenzahlungen nutzen weiter den Kurs aus „Einstellungen“. Ohne Wechsel gilt auch für Bargeld der Kurs aus „Einstellungen“.
+  - Der Wechsel selbst zählt nicht als Ausgabe. Die App zeigt, wie viel Bargeld pro Währung noch übrig ist.
 - Budget-Übersicht mit Fortschrittsbalken, Aufschlüsselung nach Kategorie, Tagessummen, Filter
 - **Offline-fähig:** Ohne Netz bleiben neue Ausgaben auf dem Handy, markiert als „nicht gesendet“. Sie werden beim nächsten Aktualisieren übertragen, ohne Duplikate. Die letzte Übersicht bleibt sichtbar.
 - Mitreisende: Die gleiche URL und den gleichen Schlüssel in ihrer App eintragen.

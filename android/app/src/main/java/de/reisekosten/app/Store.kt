@@ -25,6 +25,14 @@ class Store(context: Context) {
         get() = p.getString("lastPaidBy", "").orEmpty()
         set(v) = p.edit { putString("lastPaidBy", v) }
 
+    var lastPayment: String
+        get() = p.getString("lastPayment", PAY_CARD).orEmpty()
+        set(v) = p.edit { putString("lastPayment", v) }
+
+    var lastCountry: String
+        get() = p.getString("lastCountry", "").orEmpty()
+        set(v) = p.edit { putString("lastCountry", v) }
+
     var cachedJson: String?
         get() = p.getString("cache", null)
         set(v) = p.edit { if (v == null) remove("cache") else putString("cache", v) }
@@ -39,5 +47,14 @@ class Store(context: Context) {
         }
         set(list) = p.edit {
             putString("pending", JSONArray().apply { list.forEach { put(it.toJson()) } }.toString())
+        }
+
+    var pendingExchanges: List<Exchange>
+        get() {
+            val arr = runCatching { JSONArray(p.getString("pendingExchanges", "[]")) }.getOrDefault(JSONArray())
+            return List(arr.length()) { Exchange.fromJson(arr.getJSONObject(it), pending = true) }
+        }
+        set(list) = p.edit {
+            putString("pendingExchanges", JSONArray().apply { list.forEach { put(it.toJson()) } }.toString())
         }
 }
