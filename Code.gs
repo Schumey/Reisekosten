@@ -42,6 +42,9 @@ function doPost(e) {
       case 'addExpense':
         addExpense_(req.expense || {});
         return json_({ ok: true, data: getData_() });
+      case 'updateExpense':
+        updateExpense_(req.expense || {});
+        return json_({ ok: true, data: getData_() });
       case 'deleteExpense':
         deleteRowById_(SHEET_EXPENSES, req.id);
         return json_({ ok: true, data: getData_() });
@@ -220,45 +223,85 @@ function getData_() {
   return { settings, categories: CATEGORIES, expenses, exchanges: getExchanges_() };
 }
 
-/** Speichert eine Ausgabe. Gleiche ID zweimal = nur einmal gespeichert (wichtig fürs Offline-Nachsenden). */
-function addExpense_(e) {
-  const settings = getSettings_();
+/** Prüft eine Ausgabe aus der App und bringt sie in Form. */
+function parseExpense_(e, settings) {
   const amount = Number(String(e.amount).replace(',', '.'));
   // Negativ = Gutschrift (z. B. Kaution zurück, Erstattung)
   if (!isFinite(amount) || amount === 0) throw new Error('Bitte einen gültigen Betrag eingeben.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(e.date || ''))) throw new Error('Ungültiges Datum.');
+  const [y, m, d] = e.date.split('-').map(Number);
+  return {
+    date: new Date(y, m - 1, d),
+    category: e.category || 'Sonstiges',
+    description: e.description || '',
+    amount,
+    currency: String(e.currency || settings.baseCurrency).toUpperCase(),
+    paidBy: e.paidBy || '',
+    payment: e.payment === 'Bar' ? 'Bar' : 'Karte',
+    country: String(e.country || '').trim(),
+  };
+}
 
-  const currency = String(e.currency || settings.baseCurrency).toUpperCase();
-  const payment = e.payment === 'Bar' ? 'Bar' : 'Karte';
+/** Kurs für eine neue Ausgabe: bar → Ø-Kurs der Wechsel, sonst Kurs aus "Einstellungen". */
+function rateFor_(settings, currency, payment) {
   const cashRate = payment === 'Bar' && currency !== settings.baseCurrency
     ? cashRates_(getExchanges_())[currency] : undefined;
   const rate = cashRate || settings.rates[currency];
   if (!rate) throw new Error('Kein Wechselkurs für ' + currency + ' im Blatt "Einstellungen".');
+  return rate;
+}
+
+function expenseRow_(id, x, rate, createdAt) {
+  return [
+    id, x.date, x.category, x.description, x.amount, x.currency, rate,
+    Math.round(x.amount * rate * 100) / 100, x.paidBy, createdAt, x.payment, x.country,
+  ];
+}
+
+/** Zeilennummer (ab 2) der Ausgabe mit dieser ID, sonst 0. */
+function findRow_(sh, id) {
+  if (sh.getLastRow() < 2) return 0;
+  const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
+  const i = ids.findIndex(r => String(r[0]) === String(id));
+  return i < 0 ? 0 : i + 2;
+}
+
+/** Speichert eine Ausgabe. Gleiche ID zweimal = nur einmal gespeichert (wichtig fürs Offline-Nachsenden). */
+function addExpense_(e) {
+  const settings = getSettings_();
+  const x = parseExpense_(e, settings);
+  const rate = rateFor_(settings, x.currency, x.payment);
 
   const id = String(e.id || Utilities.getUuid());
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     const sh = SpreadsheetApp.getActive().getSheetByName(SHEET_EXPENSES);
-    if (sh.getLastRow() > 1) {
-      const ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
-      if (ids.some(r => String(r[0]) === id)) return; // schon vorhanden
-    }
-    const [y, m, d] = e.date.split('-').map(Number);
-    sh.appendRow([
-      id,
-      new Date(y, m - 1, d),
-      e.category || 'Sonstiges',
-      e.description || '',
-      amount,
-      currency,
-      rate,
-      Math.round(amount * rate * 100) / 100,
-      e.paidBy || '',
-      new Date(),
-      payment,
-      String(e.country || '').trim(),
-    ]);
+    if (findRow_(sh, id)) return; // schon vorhanden
+    sh.appendRow(expenseRow_(id, x, rate, new Date()));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Ändert eine vorhandene Ausgabe. Bleiben Währung und Zahlart gleich, bleibt auch der
+ * gespeicherte Kurs – sonst wird er neu bestimmt wie bei einer neuen Ausgabe.
+ */
+function updateExpense_(e) {
+  const settings = getSettings_();
+  const x = parseExpense_(e, settings);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sh = SpreadsheetApp.getActive().getSheetByName(SHEET_EXPENSES);
+    const row = findRow_(sh, e.id);
+    if (!row) throw new Error('Eintrag nicht gefunden – wurde er inzwischen gelöscht?');
+    const old = sh.getRange(row, 1, 1, HEADERS.length).getValues()[0];
+    const oldPayment = String(old[10]) === 'Bar' ? 'Bar' : 'Karte';
+    const keepRate = String(old[5]).toUpperCase() === x.currency && oldPayment === x.payment && Number(old[6]) > 0;
+    const rate = keepRate ? Number(old[6]) : rateFor_(settings, x.currency, x.payment);
+    sh.getRange(row, 1, 1, HEADERS.length).setValues([expenseRow_(String(e.id), x, rate, old[9] || new Date())]);
   } finally {
     lock.releaseLock();
   }

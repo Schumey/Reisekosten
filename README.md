@@ -38,6 +38,7 @@ Die Kategorien stehen oben in `Code.gs` (`CATEGORIES`). Standard: Transport Kurz
 
 ## Funktionen
 - Ausgabe erfassen: Betrag, Währung (mit Umrechnung), Zahlart (Karte/Konto oder Bargeld), Kategorie, Beschreibung, Datum, Land, „bezahlt von“
+- **Ausgabe ändern:** Auf einen Eintrag tippen, Werte anpassen, „Änderung speichern“. Klappt auch offline, die Änderung wird beim nächsten Aktualisieren gesendet. Bleiben Währung und Zahlart gleich, bleibt der gespeicherte Kurs. Sonst wird der Kurs neu bestimmt wie bei einer neuen Ausgabe.
 - **Gutschriften:** Ein negativer Betrag (Minus oder ±-Taste im Betragsfeld) zählt als Gutschrift und senkt die Summe, z. B. eine zurückgezahlte Kaution oder eine Erstattung. Kaution beim Zahlen mit +, bei der Rückgabe mit − eintragen. Bar zurückbekommen erhöht den Bargeldstand.
 - **Land:** optional pro Ausgabe. Die App schlägt bereits verwendete Länder vor und merkt sich das zuletzt gewählte. Die Übersicht zeigt die Summen nach Land. Steht im Blatt „Ausgaben“ in der Spalte „Land“.
 - **Bargeld geholt:** Geldwechsel oder Abhebung am Automaten erfassen, also was du bekommen hast und was es in Hauptwährung gekostet hat (inkl. Gebühren). Steht im Blatt „Bargeld“.

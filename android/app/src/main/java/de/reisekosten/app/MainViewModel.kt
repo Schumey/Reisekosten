@@ -22,13 +22,23 @@ data class UiState(
     val data: TripData?,
     val pending: List<Expense>,
     val pendingExchanges: List<Exchange> = emptyList(),
+    val pendingEdits: List<Expense> = emptyList(),
     val loading: Boolean = false,
     val offline: Boolean = false,
     val error: String? = null,
 ) {
     /** Ausstehende + gespeicherte Ausgaben, neueste zuerst. */
     val allExpenses: List<Expense>
-        get() = (pending + (data?.expenses ?: emptyList())).sortedByDescending { it.date }
+        get() {
+            val edited = pendingEdits.map { it.id }.toSet()
+            val saved = (data?.expenses ?: emptyList()).filterNot { it.id in edited }
+            return (pending + pendingEdits + saved).sortedByDescending { it.date }
+        }
+
+    /** Kurs für eine geänderte Ausgabe: gleiche Währung und Zahlart → alter Kurs bleibt. */
+    fun rateForEdit(old: Expense, currency: String, payment: String): Double =
+        if (old.currency == currency && old.payment == payment && old.rate > 0) old.rate
+        else rateFor(currency, payment)
 
     /** Ausstehende + gespeicherte Geldwechsel, neueste zuerst. */
     val allExchanges: List<Exchange>
@@ -72,6 +82,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             data = store.cachedData(),
             pending = store.pending,
             pendingExchanges = store.pendingExchanges,
+            pendingEdits = store.pendingEdits,
         )
     )
     val state = _state.asStateFlow()
@@ -124,6 +135,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
+    /** Ausgabe ändern – wie beim Erfassen erst lokal merken, dann senden. */
+    fun updateExpense(old: Expense, d: Draft) {
+        val rate = _state.value.rateForEdit(old, d.currency, d.payment)
+        val e = old.copy(
+            date = d.date, category = d.category, description = d.description,
+            amount = d.amount, currency = d.currency, rate = rate,
+            baseAmount = Math.round(d.amount * rate * 100) / 100.0,
+            paidBy = d.paidBy, payment = d.payment, country = d.country, pending = true,
+        )
+        if (store.pending.any { it.id == e.id }) {
+            // Noch nicht gesendet: einfach den Entwurf ersetzen
+            store.pending = store.pending.map { if (it.id == e.id) e else it }
+        } else {
+            store.pendingEdits = store.pendingEdits.filterNot { it.id == e.id } + e
+        }
+        _state.update { it.copy(pending = store.pending, pendingEdits = store.pendingEdits) }
+        refresh()
+    }
+
     fun addExchange(d: ExchangeDraft) {
         val x = Exchange(
             id = UUID.randomUUID().toString(),
@@ -137,12 +167,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteExpense(e: Expense) {
-        if (e.pending) {
+        if (store.pending.any { it.id == e.id }) {
             store.pending = store.pending.filterNot { it.id == e.id }
             _state.update { it.copy(pending = store.pending) }
             return
         }
-        deleteRemote { it.deleteExpense(e.id) }
+        deleteRemote {
+            val json = it.deleteExpense(e.id)
+            // Gelöscht: eine noch offene Änderung daran ist hinfällig
+            store.pendingEdits = store.pendingEdits.filterNot { p -> p.id == e.id }
+            json
+        }
     }
 
     fun deleteExchange(x: Exchange) {
@@ -179,7 +214,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 data = TripData.fromJson(json), pending = store.pending,
-                pendingExchanges = store.pendingExchanges,
+                pendingExchanges = store.pendingExchanges, pendingEdits = store.pendingEdits,
                 loading = false, offline = false, error = null,
             )
         }
@@ -209,16 +244,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val name = e.description.ifBlank { e.category }
                     _messages.emit("\"$name\" abgelehnt: ${ex.message}")
                 }
-                store.pending = store.pending.filterNot { it.id == e.id }
+                store.pending = store.pending.filterNot { it == e }
+            }
+            for (e in store.pendingEdits) {
+                try {
+                    latest = withContext(Dispatchers.IO) { api.updateExpense(e) }
+                } catch (ex: ApiException) {
+                    if (ex.blocking) throw ex
+                    val name = e.description.ifBlank { e.category }
+                    _messages.emit("Änderung an \"$name\" abgelehnt: ${ex.message}")
+                }
+                store.pendingEdits = store.pendingEdits.filterNot { it == e }
             }
             applyData(latest ?: withContext(Dispatchers.IO) { api.getData() })
         } catch (ex: ApiException) {
             _state.update {
-                it.copy(loading = false, pending = store.pending, pendingExchanges = store.pendingExchanges, error = ex.message)
+                it.copy(loading = false, pending = store.pending, pendingExchanges = store.pendingExchanges, pendingEdits = store.pendingEdits, error = ex.message)
             }
         } catch (_: IOException) {
             _state.update {
-                it.copy(loading = false, pending = store.pending, pendingExchanges = store.pendingExchanges, offline = true)
+                it.copy(loading = false, pending = store.pending, pendingExchanges = store.pendingExchanges, pendingEdits = store.pendingEdits, offline = true)
             }
         }
     }

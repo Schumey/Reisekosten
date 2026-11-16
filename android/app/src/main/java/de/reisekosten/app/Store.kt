@@ -49,6 +49,16 @@ class Store(context: Context) {
             putString("pending", JSONArray().apply { list.forEach { put(it.toJson()) } }.toString())
         }
 
+    /** Geänderte, schon gespeicherte Ausgaben, die noch zum Server müssen. */
+    var pendingEdits: List<Expense>
+        get() {
+            val arr = runCatching { JSONArray(p.getString("pendingEdits", "[]")) }.getOrDefault(JSONArray())
+            return List(arr.length()) { Expense.fromJson(arr.getJSONObject(it), pending = true) }
+        }
+        set(list) = p.edit {
+            putString("pendingEdits", JSONArray().apply { list.forEach { put(it.toJson()) } }.toString())
+        }
+
     var pendingExchanges: List<Exchange>
         get() {
             val arr = runCatching { JSONArray(p.getString("pendingExchanges", "[]")) }.getOrDefault(JSONArray())

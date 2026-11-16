@@ -24,6 +24,9 @@ class Api(private val url: String, private val token: String) {
     fun addExpense(e: Expense): JSONObject =
         call(JSONObject().put("action", "addExpense").put("expense", e.toJson()))
 
+    fun updateExpense(e: Expense): JSONObject =
+        call(JSONObject().put("action", "updateExpense").put("expense", e.toJson()))
+
     fun deleteExpense(id: String): JSONObject =
         call(JSONObject().put("action", "deleteExpense").put("id", id))
 

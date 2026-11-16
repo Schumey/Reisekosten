@@ -126,6 +126,10 @@ private fun dayLabel(iso: String): String = runCatching {
     }
 }.getOrDefault(iso)
 
+/** Betrag fürs Eingabefeld, z. B. 12.5 → "12,5". */
+private fun amountInput(v: Double): String =
+    v.toBigDecimal().stripTrailingZeros().toPlainString().replace('.', ',')
+
 /** Nur Ziffern, Komma, Punkt und ein Minus ganz vorne. */
 private fun signedAmount(v: String): String =
     (if (v.startsWith("-")) "-" else "") + v.filter { it.isDigit() || it == ',' || it == '.' }
@@ -175,6 +179,7 @@ private fun MainScreen(state: UiState, vm: MainViewModel, onOpenConnection: () -
     var showAdd by rememberSaveable { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
     var toDelete by remember { mutableStateOf<Expense?>(null) }
+    var toEdit by remember { mutableStateOf<Expense?>(null) }
     var exchangeToDelete by remember { mutableStateOf<Exchange?>(null) }
 
     LaunchedEffect(Unit) { vm.messages.collect { snackbar.showSnackbar(it) } }
@@ -225,22 +230,27 @@ private fun MainScreen(state: UiState, vm: MainViewModel, onOpenConnection: () -
             } else {
                 ExpenseList(
                     state, data, filter, onFilter = { filter = it },
-                    onDelete = { toDelete = it }, onDeleteExchange = { exchangeToDelete = it },
+                    onEdit = { toEdit = it }, onDelete = { toDelete = it }, onDeleteExchange = { exchangeToDelete = it },
                 )
             }
         }
     }
 
-    if (showAdd && data != null) {
+    if ((showAdd || toEdit != null) && data != null) {
+        val editing = toEdit
         AddSheet(
+            editing = editing,
             state = state,
             data = data,
             defaultCurrency = vm.defaultCurrency(data),
             defaultPaidBy = vm.lastPaidBy,
             defaultPayment = vm.lastPayment,
             defaultCountry = vm.lastCountry,
-            onDismiss = { showAdd = false },
-            onSave = { vm.addExpense(it); showAdd = false },
+            onDismiss = { showAdd = false; toEdit = null },
+            onSave = {
+                if (editing != null) vm.updateExpense(editing, it) else vm.addExpense(it)
+                showAdd = false; toEdit = null
+            },
             onSaveExchange = { vm.addExchange(it); showAdd = false },
         )
     }
@@ -278,6 +288,7 @@ private fun ExpenseList(
     data: TripData,
     filter: String?,
     onFilter: (String?) -> Unit,
+    onEdit: (Expense) -> Unit,
     onDelete: (Expense) -> Unit,
     onDeleteExchange: (Exchange) -> Unit,
 ) {
@@ -293,7 +304,7 @@ private fun ExpenseList(
     ) {
         item(key = "summary") { SummaryCard(data.settings, all.sumOf { it.baseAmount }) }
 
-        val pendingCount = state.pending.size + state.pendingExchanges.size
+        val pendingCount = state.pending.size + state.pendingEdits.size + state.pendingExchanges.size
         if (state.offline || pendingCount > 0) {
             item(key = "status") { StatusBanner(state.offline, pendingCount) }
         }
@@ -348,7 +359,7 @@ private fun ExpenseList(
                     )
                 }
             }
-            items(list, key = { it.id }) { e -> ExpenseRow(e, base, onDelete) }
+            items(list, key = { it.id }) { e -> ExpenseRow(e, base, onEdit, onDelete) }
         }
     }
 }
@@ -530,8 +541,9 @@ private fun CashCard(cash: List<CashInfo>, exchanges: List<Exchange>, base: Stri
 }
 
 @Composable
-private fun ExpenseRow(e: Expense, base: String, onDelete: (Expense) -> Unit) {
+private fun ExpenseRow(e: Expense, base: String, onEdit: (Expense) -> Unit, onDelete: (Expense) -> Unit) {
     Card(
+        onClick = { onEdit(e) },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -588,6 +600,7 @@ private fun ExpenseRow(e: Expense, base: String, onDelete: (Expense) -> Unit) {
 
 @Composable
 private fun AddSheet(
+    editing: Expense?,
     state: UiState,
     data: TripData,
     defaultCurrency: String,
@@ -610,6 +623,11 @@ private fun AddSheet(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (editing != null) {
+                Text("Ausgabe bearbeiten", style = MaterialTheme.typography.titleLarge)
+                ExpenseForm(state, data, editing, defaultCurrency, defaultPaidBy, defaultPayment, defaultCountry, onSave)
+                return@Column
+            }
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 SegmentedButton(
                     selected = !exchangeMode, onClick = { exchangeMode = false },
@@ -623,7 +641,7 @@ private fun AddSheet(
             if (exchangeMode) {
                 ExchangeForm(data, defaultCurrency, onSaveExchange)
             } else {
-                ExpenseForm(state, data, defaultCurrency, defaultPaidBy, defaultPayment, defaultCountry, onSave)
+                ExpenseForm(state, data, null, defaultCurrency, defaultPaidBy, defaultPayment, defaultCountry, onSave)
             }
         }
     }
@@ -633,6 +651,7 @@ private fun AddSheet(
 private fun ExpenseForm(
     state: UiState,
     data: TripData,
+    editing: Expense?,
     defaultCurrency: String,
     defaultPaidBy: String,
     defaultPayment: String,
@@ -640,19 +659,23 @@ private fun ExpenseForm(
     onSave: (Draft) -> Unit,
 ) {
     val base = data.settings.baseCurrency
-    var date by remember { mutableStateOf(LocalDate.now()) }
-    var category by rememberSaveable { mutableStateOf(data.categories.firstOrNull() ?: "Sonstiges") }
-    var description by rememberSaveable { mutableStateOf("") }
-    var amountText by rememberSaveable { mutableStateOf("") }
-    var currency by rememberSaveable { mutableStateOf(defaultCurrency) }
-    var paidBy by rememberSaveable { mutableStateOf(defaultPaidBy) }
-    var payment by rememberSaveable { mutableStateOf(defaultPayment) }
-    var country by rememberSaveable { mutableStateOf(defaultCountry) }
+    var date by remember {
+        mutableStateOf(editing?.let { runCatching { LocalDate.parse(it.date) }.getOrNull() } ?: LocalDate.now())
+    }
+    var category by rememberSaveable {
+        mutableStateOf(editing?.category ?: data.categories.firstOrNull() ?: "Sonstiges")
+    }
+    var description by rememberSaveable { mutableStateOf(editing?.description ?: "") }
+    var amountText by rememberSaveable { mutableStateOf(editing?.let { amountInput(it.amount) } ?: "") }
+    var currency by rememberSaveable { mutableStateOf(editing?.currency ?: defaultCurrency) }
+    var paidBy by rememberSaveable { mutableStateOf(editing?.paidBy ?: defaultPaidBy) }
+    var payment by rememberSaveable { mutableStateOf(editing?.payment ?: defaultPayment) }
+    var country by rememberSaveable { mutableStateOf(editing?.country ?: defaultCountry) }
 
     val amount = amountText.replace(',', '.').toDoubleOrNull()
     val valid = amount != null && amount != 0.0
     val amountFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { amountFocus.requestFocus() }
+    LaunchedEffect(Unit) { if (editing == null) amountFocus.requestFocus() }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
@@ -673,7 +696,7 @@ private fun ExpenseForm(
         Dropdown(
             label = "Währung",
             value = currency,
-            options = data.settings.rates.keys.sorted(),
+            options = (data.settings.rates.keys + listOfNotNull(editing?.currency)).distinct().sorted(),
             onSelect = { currency = it },
             modifier = Modifier.width(130.dp),
         )
@@ -693,9 +716,11 @@ private fun ExpenseForm(
     }
 
     if (currency != base) {
-        val rate = state.rateFor(currency, payment)
+        val keepRate = editing != null && editing.currency == currency && editing.payment == payment && editing.rate > 0
+        val rate = if (editing != null) state.rateForEdit(editing, currency, payment) else state.rateFor(currency, payment)
         val fromCash = payment == PAY_CASH && cashRates(state.allExchanges)[currency] != null
         val source = when {
+            keepRate -> "gespeicherter Kurs"
             fromCash -> "Ø-Kurs deiner Wechsel"
             payment == PAY_CASH -> "noch kein Wechsel erfasst, Kurs aus Einstellungen"
             else -> "Kurs aus Einstellungen"
@@ -713,7 +738,7 @@ private fun ExpenseForm(
     Dropdown(
         label = "Kategorie",
         value = category,
-        options = data.categories,
+        options = (data.categories + category).distinct(),
         onSelect = { category = it },
         modifier = Modifier.fillMaxWidth(),
     )
@@ -761,7 +786,7 @@ private fun ExpenseForm(
         },
         enabled = valid,
         modifier = Modifier.fillMaxWidth().height(52.dp),
-    ) { Text("Speichern") }
+    ) { Text(if (editing != null) "Änderung speichern" else "Speichern") }
 }
 
 @Composable
