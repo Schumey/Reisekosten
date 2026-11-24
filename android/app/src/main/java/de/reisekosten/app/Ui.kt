@@ -4,6 +4,9 @@ package de.reisekosten.app
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
@@ -140,6 +143,8 @@ private fun creditColor(): Color = if (isSystemInDarkTheme()) Color(0xFF81C784) 
 private fun rateText(rate: Double, cur: String, base: String): String =
     String.format(German, "1 %s = %.4f %s", cur, rate, base)
 
+private const val NO_COUNTRY = "Ohne Land"
+
 private fun categoryIcon(c: String): ImageVector = when (c) {
     "Transport", "Transport Kurzstrecke" -> Icons.Filled.DirectionsCar
     "Transport Langstrecke" -> Icons.Filled.Flight
@@ -178,6 +183,7 @@ private fun MainScreen(state: UiState, vm: MainViewModel, onOpenConnection: () -
     val snackbar = remember { SnackbarHostState() }
     var showAdd by rememberSaveable { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
+    var countryFilter by rememberSaveable { mutableStateOf<String?>(null) }
     var toDelete by remember { mutableStateOf<Expense?>(null) }
     var toEdit by remember { mutableStateOf<Expense?>(null) }
     var exchangeToDelete by remember { mutableStateOf<Exchange?>(null) }
@@ -230,6 +236,7 @@ private fun MainScreen(state: UiState, vm: MainViewModel, onOpenConnection: () -
             } else {
                 ExpenseList(
                     state, data, filter, onFilter = { filter = it },
+                    countryFilter = countryFilter, onCountryFilter = { countryFilter = it; filter = null },
                     onEdit = { toEdit = it }, onDelete = { toDelete = it }, onDeleteExchange = { exchangeToDelete = it },
                 )
             }
@@ -288,13 +295,16 @@ private fun ExpenseList(
     data: TripData,
     filter: String?,
     onFilter: (String?) -> Unit,
+    countryFilter: String?,
+    onCountryFilter: (String?) -> Unit,
     onEdit: (Expense) -> Unit,
     onDelete: (Expense) -> Unit,
     onDeleteExchange: (Exchange) -> Unit,
 ) {
     val base = data.settings.baseCurrency
     val all = state.allExpenses
-    val shown = all.filter { filter == null || it.category == filter }
+    val scoped = all.filter { countryFilter == null || it.country.ifBlank { NO_COUNTRY } == countryFilter }
+    val shown = scoped.filter { filter == null || it.category == filter }
     val byDay = shown.groupBy { it.date }
 
     LazyColumn(
@@ -310,11 +320,13 @@ private fun ExpenseList(
         }
 
         if (all.isNotEmpty()) {
-            item(key = "cats") { CategoryCard(all, base) }
+            item(key = "cats") {
+                CategoryCard(scoped, base, title = countryFilter?.let { "Nach Kategorie · $it" } ?: "Nach Kategorie")
+            }
         }
 
         if (all.any { it.country.isNotBlank() }) {
-            item(key = "countries") { CountryCard(all, base) }
+            item(key = "countries") { CountryCard(all, base, countryFilter, onCountryFilter) }
         }
 
         if (state.allExchanges.isNotEmpty()) {
@@ -323,6 +335,7 @@ private fun ExpenseList(
 
         item(key = "filter") {
             val cats = (data.categories + all.map { it.category }).distinct()
+                .filter { c -> countryFilter == null || scoped.any { it.category == c } }
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item { FilterChip(selected = filter == null, onClick = { onFilter(null) }, label = { Text("Alle") }) }
                 items(cats) { c ->
@@ -426,7 +439,7 @@ private fun StatusBanner(offline: Boolean, pending: Int) {
 }
 
 @Composable
-private fun CategoryCard(all: List<Expense>, base: String) {
+private fun CategoryCard(all: List<Expense>, base: String, title: String) {
     val sums = all.groupBy { it.category }
         .mapValues { (_, v) -> v.sumOf { it.baseAmount } }
         .entries.sortedByDescending { it.value }
@@ -437,7 +450,7 @@ private fun CategoryCard(all: List<Expense>, base: String) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Nach Kategorie", style = MaterialTheme.typography.titleSmall)
+            Text(title, style = MaterialTheme.typography.titleSmall)
             sums.forEach { (cat, sum) ->
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -459,8 +472,8 @@ private fun CategoryCard(all: List<Expense>, base: String) {
 }
 
 @Composable
-private fun CountryCard(all: List<Expense>, base: String) {
-    val sums = all.groupBy { it.country.ifBlank { "Ohne Land" } }
+private fun CountryCard(all: List<Expense>, base: String, selected: String?, onSelect: (String?) -> Unit) {
+    val sums = all.groupBy { it.country.ifBlank { NO_COUNTRY } }
         .mapValues { (_, v) -> v.sumOf { it.baseAmount } }
         .entries.sortedByDescending { it.value }
     val max = sums.maxOf { it.value }.coerceAtLeast(0.01)
@@ -470,13 +483,23 @@ private fun CountryCard(all: List<Expense>, base: String) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Nach Land", style = MaterialTheme.typography.titleSmall)
+            Text("Nach Land (antippen zum Filtern)", style = MaterialTheme.typography.titleSmall)
             sums.forEach { (land, sum) ->
-                Column {
+                val isSel = selected == land
+                Column(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                        .clickable { onSelect(if (isSel) null else land) }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Public, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Text(land, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            land, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
+                        )
                         Text(money(sum, base), style = MaterialTheme.typography.bodyMedium)
                     }
                     Spacer(Modifier.height(4.dp))
